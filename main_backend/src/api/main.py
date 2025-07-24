@@ -261,6 +261,80 @@ def analyze_repo(
         raw_llm_response=raw_llm,
     )
 
+# PUBLIC_INTERFACE
+from fastapi import Request
+
+@app.post("/api/analyze", tags=["api"], summary="Frontend compatibility endpoint: analyze repo from directory path", response_model=dict)
+async def analyze_api(request: Request, db: Session = Depends(get_db), current_user: models_module.User = Depends(get_current_user)):
+    """
+    Compatibility endpoint for frontend: receives JSON {"directory": ...}
+    Simulates a repo upload with provided path, analysis, and returns sample cards.
+    """
+    data = await request.json()
+    directory = data.get("directory")
+    if not directory:
+        return JSONResponse(status_code=400, content={"detail": "No directory provided"})
+
+    # Mimic upload record creation for demo (a true implementation would zip/copy/etc)
+    repo_upload = models_module.RepositoryUpload(
+        user_id=current_user.id,
+        repo_path=directory,
+        upload_time=datetime.utcnow()
+    )
+    db.add(repo_upload)
+    db.commit()
+    db.refresh(repo_upload)
+    # Run analysis as per original route
+    git_out = try_git_diff(directory)
+    rg_out = try_ripgrep(directory)
+    commit_message, suggestions, issues, raw_llm = call_llm_tools(git_out, rg_out, directory)
+    res_obj = models_module.AnalysisResult(
+        upload_id=repo_upload.id,
+        commit_message=commit_message,
+        code_suggestions=suggestions,
+        detected_issues=issues,
+        raw_llm_response=raw_llm,
+        created_at=datetime.utcnow(),
+    )
+    db.add(res_obj)
+    db.commit()
+    db.refresh(res_obj)
+    # Return summary in frontend format
+    return {
+        "directory": directory,
+        "cards": [
+            {"type": "commit", "message": commit_message},
+            {"type": "suggestion", "suggestion": suggestions.get("refactor", "")},
+            {"type": "issue", "issue": issues.get("warnings", [""])[0]}
+        ]
+    }
+
+
+# PUBLIC_INTERFACE
+@app.get("/api/analyses", tags=["api"], summary="Frontend compatibility endpoint: get analysis history", response_model=list)
+def analyses_api(db: Session = Depends(get_db), current_user: models_module.User = Depends(get_current_user)):
+    """
+    Compatibility endpoint for frontend: returns list of previous analyses in frontend's format.
+    """
+    uploads = db.query(models_module.RepositoryUpload).filter(models_module.RepositoryUpload.user_id == current_user.id).all()
+    result = []
+    for upload in uploads:
+        ars = db.query(models_module.AnalysisResult).filter(models_module.AnalysisResult.upload_id == upload.id).all()
+        cards = []
+        for r in ars:
+            cards.append({"type": "commit", "message": (r.commit_message or "")})
+            if r.code_suggestions:
+                cards.append({"type": "suggestion", "suggestion": r.code_suggestions.get("refactor", "")})
+            if r.detected_issues:
+                first_issue = (r.detected_issues.get("warnings", [""]) or [""])[0]
+                cards.append({"type": "issue", "issue": first_issue})
+        result.append({
+            "directory": upload.repo_path,
+            "cards": cards
+        })
+    return result
+
+
 def try_git_diff(path: str) -> str:
     # If .git exists, get diff; else, try to init and diff all
     git_dir = os.path.join(path, ".git")
