@@ -1,4 +1,0 @@
-{
-    "command": "pytest",
-    "working_directory": "/home/kavia/workspace/code-generation/codereview-assistant-79514/main_backend"
-}
